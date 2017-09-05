@@ -14,14 +14,39 @@ from torch.autograd import Variable
 from PIL import Image
 
 
+'''
+Mode
+'''
+
+''' Training '''
+train_mode = False
+enable_cuda = False
+model_save = "model.pt"
+
+
+''' Testing '''
+test_mode = True
+display_while_test = False
+model_load = "model.pt"
+
+# train and test are mutually exclusive
+test_mode = not train_mode
+
+# cannot display while training
+display_while_test = display_while_test and not train_mode
+
+# cannot use cuda while displaying
+enable_cuda = enable_cuda and not display_while_test
+
+'''
+Training Parameters
+'''
 batch_size = 100
 learning_rate = 0.001
 momentum = 0.9
 epochs = 100
-cuda = True
 
 log_interval = 100
-display = False
 
 
 class RandomAffine:
@@ -85,7 +110,7 @@ class Net(nn.Module):
         self.loc_fc1 = nn.Linear(20 * 18 * 18, 20)
         self.loc_fc2 = nn.Linear(20, 6)
         self.loc_fc2.weight.data.fill_(0)
-        self.loc_fc2.bias.data = tr.FloatTensor([1, 0, 0, 1, 0, 0])
+        self.loc_fc2.bias.data = tr.FloatTensor([1, 0, 0, 0, 1, 0])
 
         self.spatial = AffineSpatialTransform(48, 48)
 
@@ -104,13 +129,23 @@ class Net(nn.Module):
             l = F.relu(self.loc_fc1(l))
             l = l.view(-1, 20)
             l = self.loc_fc2(l).view(-1, 2, 3)
-            x = self.spatial(x, l)
 
-        if display:
-            img = x.data[0].transpose(0,2).squeeze().numpy()
-            plt.imshow(img, cmap='gray')
-            plt.show()
-            print(l.data)
+            if display_while_test:
+                f, (ax1, ax2) = plt.subplots(2, 1, sharey=True)
+                img = x.data[0].permute(1, 2, 0).squeeze().numpy()
+                ax1.imshow(img)
+
+            x, coord = self.spatial(x, l)
+
+            if display_while_test:
+                img = x.data[0].permute(1, 2, 0).squeeze().numpy()
+                ax2.imshow(img)
+
+                coord = coord[0]
+                x_coord = coord[..., 0].data
+                y_coord = coord[..., 1].data
+                ax1.plot(x_coord.numpy(), y_coord.numpy(), 'ro')
+                plt.show()
 
         x = F.relu(F.max_pool2d(self.conv1(x), 2))
         x = F.relu(F.max_pool2d(self.conv2_drop(self.conv2(x)), 2))
@@ -126,15 +161,9 @@ def train(model, optimizer, epoch):
     for batch_idx, (data, target) in enumerate(train_loader):
         data, target = Variable(data), Variable(target)
 
-        if cuda:
+        if enable_cuda:
             data = data.cuda()
             target = target.cuda()
-
-        if display:
-            img = data.data[0].transpose(0,2).squeeze().numpy()
-            print(target.data[0])
-            plt.imshow(img, cmap='gray')
-            plt.show()
 
         optimizer.zero_grad()
         output = model(data)
@@ -153,15 +182,9 @@ def test(model):
     correct = 0
     for data, target in test_loader:
         data, target = Variable(data, volatile=True), Variable(target)
-        if cuda:
+        if enable_cuda:
             data = data.cuda()
             target = target.cuda()
-
-        if display:
-            img = data.data[0].transpose(0, 2).squeeze().numpy()
-            print(target.data[0])
-            plt.imshow(img, cmap='gray')
-            plt.show()
 
         output = model(data)
         test_loss += F.nll_loss(output, target, size_average=False).data[0] # sum up batch loss
@@ -175,24 +198,27 @@ def test(model):
 
 
 if __name__ == "__main__":
-    model = Net(stn=False)
-    params_be_updated = filter(lambda p: p.requires_grad, model.parameters())
-    optimizer = optim.SGD(params_be_updated, lr=learning_rate, momentum=momentum)
-
-    if cuda:
+    model = Net(stn=True)
+    if enable_cuda:
         model.cuda()
-    for epoch in range(1, epochs + 1):
-        if epoch % 10 == 0:
-            learning_rate = learning_rate / 2
-            print("Update: learning rate %f" % learning_rate)
-            params_be_updated = filter(lambda p: p.requires_grad, model.parameters())
-            optimizer = optim.SGD(params_be_updated, lr=learning_rate, momentum=momentum)
 
-        train(model, optimizer, epoch)
-        test(model)
+    # Training
+    if train_mode:
+        optimizer = optim.SGD(model.parameters(), lr=learning_rate, momentum=momentum)
+        for epoch in range(1, epochs + 1):
+            if epoch % 10 == 0:
+                learning_rate = learning_rate / 2
+                print("Update: learning rate %f" % learning_rate)
+                optimizer = optim.SGD(model.parameters(), lr=learning_rate, momentum=momentum)
 
-    display=True
-    cuda=False
+            train(model, optimizer, epoch)
+            test(model)
 
-    model.cpu()
-    test(model)
+        if model_save is not None:
+            tr.save(model.state_dict(), model_save)
+
+    # Testing
+    if test_mode:
+        if model_load is not None:
+            model.load_state_dict(tr.load(model_load))
+            test(model)
